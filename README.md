@@ -1,1 +1,2 @@
 # Sokoblue
+Requires PyGame
