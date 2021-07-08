@@ -1,2 +1,2 @@
 # Sokoblue
-Requires PyGame
+Requires PyGame and pathfinding
