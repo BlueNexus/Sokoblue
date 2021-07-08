@@ -2,6 +2,9 @@
 import pygame, sys, random, time
 from pygame.locals import *
 from copy import *
+from pathfinding.core.diagonal_movement import DiagonalMovement
+from pathfinding.core.grid import Grid
+from pathfinding.finder.a_star import AStarFinder
 ### END IMPORTS
 
 ### PYGAME CONSTANTS
@@ -33,6 +36,7 @@ BgColour    = Grey
 TextColour  = White
 myfont = pygame.font.SysFont("monospace", 15)
 ### END PYGAME CONSTANTS
+    
 
 
 class GameController():
@@ -246,21 +250,34 @@ class Tile():
     obj_passable = True
     player_passable = True
     can_hold_objects = True
+    x = 0
+    y = 0
 
 
-    def __init__(self):
+    def __init__(self, nx, ny):
         self.sprite = self.base_sprite
         self.contents = []
+        self.x = nx
+        self.y = ny
 
     def add_to_tile(self, obj):
         '''Params: obj (Object)
     Outputs: obj or False (Object or Boolean)
     If this tile is empty, adds the object to its contents. Otherwise, return false
     '''
-        if(obj not in self.contents and len(self.contents) == 0 and self.can_hold_objects):
+        if(obj not in self.contents and self.is_empty()):
             self.contents.append(obj)
             self.update_icon()
             return obj
+        return False
+
+    def is_empty(self):
+        '''Params: None
+        Outputs: True or False
+        If this tile is empty, return true, otherwise false
+        '''
+        if(len(self.contents) == 0 and self.can_hold_objects):
+            return True
         return False
 
     def remove_from_tile(self):
@@ -351,6 +368,10 @@ class Box():
     #A box object
     sprite = "O"
     name = "Box"
+    diamond = None
+
+    def __init__(self, d):
+        self.diamond = d
 
 class Player():
     #A player object
@@ -375,6 +396,7 @@ class GameMap():
 class RandomGameMap(GameMap):
     #Randomised game map. This is where things get interesting.
     tiles = []
+    waypoints = []
 
     def __init__(self, h, w, b, wc, d, ids):
         self.height = h
@@ -436,11 +458,12 @@ class RandomGameMap(GameMap):
     def generate(self):
         #'Oh god here we go.
         #Generate the base map
-        self.tiles = [[Tile() for x in range(self.width)] for y in range(self.height)]
+        self.waypoints = []
+        self.tiles = [[Tile(x,y) for x in range(self.width)] for y in range(self.height)]
         for row_no, row in enumerate(self.tiles):
             for col_no, col in enumerate(row):
                 if(row_no == 0 or col_no == 0 or row_no == self.height - 1 or col_no == self.width - 1):
-                    self.place_tile(row_no, col_no, Wall())
+                    self.place_tile(row_no, col_no, Wall(row_no, col_no))
 
         #Draws random walls
         for wall in range(self.wallcount):
@@ -465,28 +488,33 @@ class RandomGameMap(GameMap):
             path = self.get_line(rand1x, rand1y, rand2x, rand2y)
             for t in path:
                 try:
-                    x, y = self.get_tile_coords(t)
+                    x, y = t.x, t.y
                 except:
                     #Something went wrong, CODE RED ABORT ABORT
                     self.reject()
                     return
-                self.tiles[x][y] = Wall()
+                self.tiles[x][y] = Wall(x,y)
 
         #Place the player. Somewhere.
         valid = False
+        playertile = None
         while(valid == False):
-            valid = self.tiles[random.randint(1, self.height -1)][random.randint(1, self.width - 1)].add_to_tile(Player(1,1))
+            playertile = self.tiles[random.randint(1, self.height -1)][random.randint(1, self.width - 1)]
+            valid = playertile.add_to_tile(Player(1,1))
             self.player = valid
             random.seed()
+        waypoints = [playertile]
+        #tiles_to_check = [roaming_pos] #Tiles to attempt to pathfind between
 
         def makepath(tile):
             #print("STARTING PATH CALCULATION")
             start_point = tile
             line_length = self.difficulty
-            startbox = Box()
+            startbox = Box(start_point)
             start_point.add_to_tile(startbox)
             step = 0
             path = [start_point]
+            next_point = 0
             tries = 0
             #Move a box backwards, to make sure the game can be solved.
             while(step < line_length):
@@ -496,7 +524,7 @@ class RandomGameMap(GameMap):
                 if(tries > self.difficulty * 10):
                     path[-1].remove_from_tile()
                     #OH GOD ABORT IT'S ALL ON FIRE
-                    return False
+                    return False, False, False, False
                 dx = 0
                 dy = 0
                 x_or_y = random.choice((1,2))
@@ -505,7 +533,7 @@ class RandomGameMap(GameMap):
                 else:
                     dy = random.choice((1,-1))
                 #print("STEP: " + str(step))
-                try_add = self.try_step(dx,dy,path[-1])
+                try_add, next_tile = self.try_step(dx,dy,path[-1])
                 if(try_add):
                     #print("PROGRESSING")
                     path.append(try_add)
@@ -517,14 +545,16 @@ class RandomGameMap(GameMap):
                         path.pop(-1)
                         step -= 1
             #print(str(self))
-            return path
+            
+            
+            return path, path[1], next_tile, startbox
 
         #Randomly place diamonds, then a box.
         for box in range(self.boxcount):
             tries = 0
             ovalid = False #I just realised that this looks like something else entirely
             while(ovalid == False):
-                if(tries > self.boxcount * 5):
+                if(tries > self.boxcount * 6):
                     #As usual, it's all gone wrong oh god send the fire brigade
                     #Seriously though, this is here to prevent an infinite loop.
                     self.reject()
@@ -539,11 +569,15 @@ class RandomGameMap(GameMap):
                         self.tiles[randx][randy] = Diamond()
                         valid = True
                     random.seed()
-                if(makepath(self.get_tile(randx,randy))):
+                path, endpoint, startpoint, temp_box = makepath(self.get_tile(randx,randy))
+                if(path):
+                    waypoints.append(startpoint)
+                    waypoints.append(endpoint)
+                    #tiles_to_check.append([box_end_pos, temp_box])
                     ovalid = True
                 else:
                     tries += 1
-                    self.tiles[randx][randy] = Tile()
+                    self.tiles[randx][randy] = Tile(randx, randy)
 
         #Try and make sure the level can be solved. Emphasis on try.
         check_box_count = 0
@@ -562,7 +596,7 @@ class RandomGameMap(GameMap):
                             self.reject()
     
                             return
-'''
+                        '''
                         check_box_count += 1
                 if(type(self.tiles[l][r]) == Diamond):
                     check_diamond_count += 1
@@ -570,11 +604,66 @@ class RandomGameMap(GameMap):
             #We somehow generated too many boxes, abort.
             self.reject()
             return
+
+        #Create a grid out of the tiles 2d array
+        resgrid = Grid(matrix=self.convert_to_grid(self.tiles))
+        finder = AStarFinder(diagonal_movement = DiagonalMovement.never)
+
+        #Create a copy of the waypoints list and remove any errored waypoints
+        for point in waypoints[:]:
+            print("X: ", point.x, "Y:", point.y)
+            if(point.x == 0 and point.y == 0):
+                print("oops")
+                waypoints.remove(point)
+        
+        def get_node(to_node):
+            coordx, coordy = to_node.x, to_node.y
+            return resgrid.node(coordx, coordy)
+
+        #Turn the waypoints list into a list of nodes
+        nodes = []
+        for pos in range(len(waypoints)):
+            nodes.append(get_node(waypoints[pos]))
+
+        '''
+        path, runs = finder.find_path(playerpos, nodes[0], resgrid)
+        if(len(path) == 0):
+            self.reject()
+            return 
+        print("operations",runs,"path length:", len(path))
+        '''
+
+        for node_index in range(len(nodes)):
+            if(node_index + 1 <= len(nodes)-1):
+                resgrid.cleanup()
+
+                path, runs = finder.find_path(nodes[node_index], nodes[node_index + 1], resgrid)
+                print(resgrid.grid_str(path=path, start=nodes[node_index], end=nodes[node_index + 1]))
+                print("operations",runs,"path length:", len(path))
+
+                if(len(path) == 0):
+                    self.reject()
+                    return
         
 
+    
+
+
+    def convert_to_grid(self, to_grid):
+        results = [];
+        temp = [];
+        for indexh in range(self.height):
+            temp = [];
+            for indexw in range(self.width):
+                char = str(to_grid[indexh][indexw])
+                conv_char = "0" if char in ["#"] else "1"
+                temp.append(conv_char)
+            results.append(temp)
+            print(temp)
+        return results
             
 
-
+    #deprecated
     def get_tile_coords(self, tile):
         for row in range(self.height):
             for col in range(self.width):
@@ -588,24 +677,25 @@ class RandomGameMap(GameMap):
             dest = self.tiles[x + dx][y + dy]
         except:
             valid = False
-            return valid
+            return valid, valid
         if(len(dest.contents)):
             valid = False
-            return valid
+            return valid, valid
         if(not dest.obj_passable):
             valid = False
-            return valid
+            return valid, valid
+        next_tile = self.tiles[x + (dx*2)][y + (dy*2)]
         try:
-            if(not self.tiles[x + (dx*2)][y + (dy*2)].obj_passable):
+            if(not next_tile.is_empty()):
                 valid = False
-                return valid
+                return valid, valid
         except:
             valid = False
-            return valid
+            return valid, valid
         if(valid):
             obj = tile.remove_from_tile()
             dest.add_to_tile(obj)
-            return dest
+            return dest, next_tile
         return False
 
     def is_not_passable(self, x, y):
